@@ -143,10 +143,15 @@ class MambaFusion(Detector3DTemplate):
         disp_dict = {}
 
         loss_trans, tb_dict = batch_dict['loss'],batch_dict['tb_dict']
+        loss_global_align = batch_dict.get('loss_global_align', None)
+        if loss_global_align is not None:
+            loss_trans = loss_trans + loss_global_align
         tb_dict = {
             'loss_trans': loss_trans.item(),
             **tb_dict
         }
+        if loss_global_align is not None:
+            tb_dict['loss_global_align'] = loss_global_align.item()
 
         loss = loss_trans
         return loss, tb_dict, disp_dict
