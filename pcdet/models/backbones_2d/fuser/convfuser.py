@@ -8,7 +8,7 @@ import torch.utils.checkpoint as checkpoint
 import torch.nn.functional as F
 import os
 import numpy as np
-from .GlobalAlign import GlobalAlign
+from .graphbev_global_align import GraphBEVGlobalAlign
 class ConvFuser(nn.Module):
     def __init__(self,model_cfg) -> None:
         super().__init__()
@@ -34,19 +34,19 @@ class ConvFuser(nn.Module):
                 nn.ReLU(),
                 )
         self.use_vmamba = model_cfg.get('USE_VMAMBA', False)
-        self.use_global_align = model_cfg.get('USE_GLOBAL_ALIGN', False)
+        self.use_graphbev_global_align = model_cfg.get('USE_GRAPHBEV_GLOBAL_ALIGN', False)
         self.use_checkpoint = model_cfg.get('USE_CHECKPOINT', True)
         self.use_merge_after = model_cfg.get('USE_MERGE_AFTER', False)
-        if self.use_global_align:
-            global_align_cfg = {
-                'IMG_CHANNEL': model_cfg.get('IMG_CHANNEL', 80),
-                'LIDAR_CHANNEL': model_cfg.get('LIDAR_CHANNEL', 128),
-                'IN_CHANNEL': model_cfg.get('IMG_CHANNEL', 80) + model_cfg.get('LIDAR_CHANNEL', 128),
-                'OUT_CHANNEL': model_cfg.get('LIDAR_CHANNEL', 128),
-                'MAX_OFFSET_PIX': model_cfg.get('GLOBAL_ALIGN_MAX_OFFSET_PIX', 4.0),
-                'LOSS_WEIGHT': model_cfg.get('GLOBAL_ALIGN_LOSS_WEIGHT', 0.05),
+        if self.use_graphbev_global_align:
+            graphbev_align_cfg = {
+                'IMG_CHANNEL': model_cfg.get('GRAPHBEV_ALIGN_IMG_CHANNEL', 80),
+                'LIDAR_CHANNEL': model_cfg.get('GRAPHBEV_ALIGN_LIDAR_CHANNEL', 128),
+                'IN_CHANNEL': model_cfg.get('GRAPHBEV_ALIGN_IMG_CHANNEL', 80) + model_cfg.get('GRAPHBEV_ALIGN_LIDAR_CHANNEL', 128),
+                'OUT_CHANNEL': model_cfg.get('GRAPHBEV_ALIGN_LIDAR_CHANNEL', 128),
+                'MAX_OFFSET_PIX': model_cfg.get('GRAPHBEV_ALIGN_MAX_OFFSET_PIX', 4.0),
+                'LOSS_WEIGHT': model_cfg.get('GRAPHBEV_ALIGN_LOSS_WEIGHT', 0.05),
             }
-            self.global_align = GlobalAlign(global_align_cfg)
+            self.graphbev_global_align = GraphBEVGlobalAlign(graphbev_align_cfg)
         if self.use_merge_after:
             depths = [1]
             num_block = len(depths)
@@ -411,13 +411,12 @@ class ConvFuser(nn.Module):
         """
         img_bev = batch_dict['spatial_features_img']
         lidar_bev = batch_dict['spatial_features']
-        if self.use_global_align:
-            lidar_bev, loss_global_align = self.global_align.forward_features(
+        if self.use_graphbev_global_align:
+            lidar_bev, loss_graphbev_global_align = self.graphbev_global_align.forward_features(
                 img_bev, lidar_bev, compute_loss=self.training
             )
-            batch_dict['spatial_features'] = lidar_bev
-            if loss_global_align is not None:
-                batch_dict['loss_global_align'] = loss_global_align
+            if loss_graphbev_global_align is not None:
+                batch_dict['loss_graphbev_global_align'] = loss_graphbev_global_align
         if self.use_vmamba:
             if self.use_checkpoint:
                 cat_bev = checkpoint.checkpoint(self.mamba_forward, img_bev, lidar_bev)
