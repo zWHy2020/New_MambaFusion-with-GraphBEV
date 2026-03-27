@@ -4,9 +4,11 @@ from pcdet.ops.bev_pool import bev_pool
 from pcdet.models.backbones_3d.local_mamba import GlobalMamba
 from functools import partial
 from pcdet.models.backbones_3d.lion_backbone_one_stride import LocalMamba
+from pcdet.models.backbones_2d.fuser.GlobalAlign import GlobalAlign
 from easydict import EasyDict
 from ...utils.spconv_utils import replace_feature, spconv
 from pcdet.ops.bev_pool_v2.bev_pool import bev_pool_v2
+from torch_scatter import scatter_mean
 
 __all__ = ["LSSTransform_Lite, LSSTransform"]
 
@@ -27,6 +29,20 @@ class LSSTransform_Lite(nn.Module):
         self.use_mamba = self.model_cfg.get("USE_MAMBA", False)
         self.use_multi_block = model_cfg.get('USE_MULTI_BLOCK', False)
         self.use_pool_v2 = model_cfg.get('USE_POOL_V2', False)
+        self.use_global_align = self.model_cfg.get('USE_GLOBAL_ALIGN', False)
+        self.global_align = None
+        self.lidar_align_proj = None
+        if self.use_global_align:
+            align_cfg = {
+                'IMG_CHANNEL': out_channel,
+                'LIDAR_CHANNEL': out_channel,
+                'IN_CHANNEL': out_channel * 2,
+                'OUT_CHANNEL': out_channel,
+                'MAX_OFFSET_PIX': self.model_cfg.get('GLOBAL_ALIGN_MAX_OFFSET_PIX', 4.0),
+                'LOSS_WEIGHT': self.model_cfg.get('GLOBAL_ALIGN_LOSS_WEIGHT', 0.05)
+            }
+            self.global_align = GlobalAlign(align_cfg)
+            self.lidar_align_proj = nn.LazyConv2d(out_channel, kernel_size=1, bias=False)
         if self.use_pool_v2:
             self.grid_config = {'x': [-54.0, 54.0, 0.3], 'y': [-54.0, 54.0, 0.3], 'z': [-5.0, 3.0, 8.0], 'depth': [1.0, 60.0, 0.5]}
             self.create_grid_infos(**self.grid_config)
@@ -278,6 +294,30 @@ class LSSTransform_Lite(nn.Module):
         self.grid_interval = torch.Tensor([cfg[2] for cfg in [x, y, z]])
         self.grid_size = torch.Tensor([(cfg[1] - cfg[0]) / cfg[2]
                                        for cfg in [x, y, z]])
+
+    def build_lidar_bev_anchor(self, batch_dict, bev_hw):
+        pillar_features, coords = batch_dict['pillar_features'], batch_dict['voxel_coords']
+        batch_size = int(batch_dict['batch_size'])
+        h, w = bev_hw
+        num_channels = pillar_features.shape[1]
+        anchor = torch.zeros(
+            batch_size,
+            num_channels,
+            h * w,
+            dtype=pillar_features.dtype,
+            device=pillar_features.device
+        )
+        for batch_idx in range(batch_size):
+            batch_mask = coords[:, 0] == batch_idx
+            if not batch_mask.any():
+                continue
+            cur_coords = coords[batch_mask, :]
+            indices = cur_coords[:, 1] * h * w + cur_coords[:, 2] * w + cur_coords[:, 3]
+            cur_pillars = pillar_features[batch_mask, :].t().contiguous()
+            dense_feats = scatter_mean(cur_pillars, indices.long(), dim=1, dim_size=h * w)
+            anchor[batch_idx] = dense_feats
+        anchor = anchor.view(batch_size, num_channels, h, w)
+        return self.lidar_align_proj(anchor)
     def load_template(self, path, rank):
         template = torch.load(path)
         if isinstance(template, dict):
@@ -564,6 +604,14 @@ class LSSTransform_Lite(nn.Module):
                 x = self.bev_pool(geom, x) # [2, 80, 360, 360]
 
         x = self.downsample(x) # [2, 80, 360, 360]
+        if self.use_global_align:
+            lidar_anchor_bev = self.build_lidar_bev_anchor(batch_dict, x.shape[-2:])
+            # align image BEV to lidar anchor before Hilbert/Mamba serialization
+            x, loss_global_align = self.global_align.forward_features(
+                lidar_anchor_bev, x, compute_loss=self.training
+            )
+            if loss_global_align is not None:
+                batch_dict['loss_global_align'] = loss_global_align
         if self.use_mamba:
             if not self.template_on_device:
                 self.template_on_device = True
