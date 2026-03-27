@@ -7,7 +7,7 @@ class GlobalAlign(nn.Module):
         super(GlobalAlign, self).__init__()
         self.model_cfg = model_cfg
         self.img_channel = self.model_cfg.get('IMG_CHANNEL', 80)
-        self.lidar_channel = self.model_cfg.get('LIDAR_CHANNEL', 128)
+        self.lidar_channel = self.model_cfg.get('LIDAR_CHANNEL', 80)
         in_channel = self.model_cfg.get('IN_CHANNEL', self.img_channel + self.lidar_channel)
         out_channel = self.model_cfg.get('OUT_CHANNEL', self.lidar_channel)
         self.max_offset_pix = float(self.model_cfg.get('MAX_OFFSET_PIX', 4.0))
@@ -36,7 +36,6 @@ class GlobalAlign(nn.Module):
     def forward_features(self, img_bev, lidar_bev, compute_loss=False):
         cat_bev = torch.cat([img_bev, lidar_bev], dim=1)
         offset = self.offset_conv(cat_bev)
-
         b, _, h, w = offset.shape
         offset = torch.tanh(offset) * self.max_offset_pix
         offset_x = offset[:, 0] / max((w - 1) / 2.0, 1.0)
@@ -50,7 +49,6 @@ class GlobalAlign(nn.Module):
             padding_mode='zeros', align_corners=True
         )
         deformed_feature = self.deform_conv(aligned_lidar)
-
         loss = None
         if compute_loss:
             mm_bev = self.conv(cat_bev)
